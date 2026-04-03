@@ -220,3 +220,35 @@ func (db *DB) LinkArtistGenre(artistID, genreID int) error {
 	`, artistID, genreID)
 	return err
 }
+
+// FindTrackByTags finds a track by its metadata tags
+func (db *DB) FindTrackByTags(title, album, artist string) (*models.Track, error) {
+	var track models.Track
+	err := db.Get(&track, `
+		SELECT t.* FROM tracks t
+		JOIN albums a ON a.id = t.album_id
+		JOIN artists ar ON ar.id = t.artist_id
+		WHERE LOWER(t.title) = LOWER($1)
+		AND LOWER(a.title) = LOWER($2)
+		AND LOWER(ar.name) = LOWER($3)
+		LIMIT 1
+	`, title, album, artist)
+	if err != nil {
+		return nil, err
+	}
+	return &track, nil
+}
+
+// FindTrackByNumber finds a track by artist and track number
+func (db *DB) FindTrackByNumber(artistID, trackNumber int) (*models.Track, error) {
+	var track models.Track
+	err := db.Get(&track, `
+		SELECT * FROM tracks
+		WHERE artist_id = $1 AND track_number = $2
+		LIMIT 1
+	`, artistID, trackNumber)
+	if err != nil {
+		return nil, err
+	}
+	return &track, nil
+}

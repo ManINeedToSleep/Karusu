@@ -3,6 +3,7 @@ package api
 import (
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -44,6 +45,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 
 		// Library
 		api.GET("/library/wanted", h.getWanted)
+		api.POST("/library/scan", h.scanLibrary)
 	}
 }
 
@@ -291,6 +293,18 @@ func (h *Handler) getWanted(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, albums)
+}
+// scanLibrary walks the music directory and reconciles files with the database
+// marks tracks as downloaded if the files exist on disk
+// POST /api/library/scan
+func (h *Handler) scanLibrary(c *gin.Context) {
+	scanner := library.NewScanner(h.db, os.Getenv("MUSIC_DIR"))
+	result, err := scanner.Scan()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
 }
 
 // -----------------------------------------------------------------------------
