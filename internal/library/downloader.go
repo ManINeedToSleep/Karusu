@@ -12,8 +12,11 @@ import (
 	"karusu/internal/slskd"
 )
 
-// Downloader manages the full pipeline of searching, downloading, and organizing music
-type Downloader struct {
+const (
+	// MaxFilesPerDownload prevents accidentally downloading entire libraries
+	// when a wildcard search matches too broadly
+	MaxFilesPerDownload = 50
+)
 	db        *db.DB
 	slskd     *slskd.Client
 	organizer *Organizer
@@ -82,6 +85,17 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 	}
 
 	if len(results) == 0 {
+		// Retry with wildcard — bypasses some Soulseek filters e.g. "*endrick Lamar"
+		log.Printf("[Karusu] No results, retrying with wildcard...")
+		wildcardQuery := "*" + buildSearchQuery(artist.Name[1:], album.Title)
+		search2, err2 := d.slskd.StartSearch(wildcardQuery)
+		if err2 == nil {
+			d.slskd.WaitForSearch(search2.ID, 45*time.Second)
+			results, _ = d.slskd.GetSearchResults(search2.ID)
+		}
+	}
+
+	if len(results) == 0 {
 		d.db.UpdateAlbumStatus(albumID, models.AlbumStatusMissing)
 		return fmt.Errorf("no results found for %s", query)
 	}
@@ -97,6 +111,12 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 
 	log.Printf("[Karusu] Best result from: %s (%d files, score: %d)",
 		best.result.Username, len(best.files), best.score)
+
+	// Safety check — if too many files something went wrong with matching
+	if len(best.files) > MaxFilesPerDownload {
+		log.Printf("[Karusu] Too many files (%d), truncating to first %d", len(best.files), MaxFilesPerDownload)
+		best.files = best.files[:MaxFilesPerDownload]
+	}
 
 	// Enqueue all files for download
 	for _, f := range best.files {
@@ -160,14 +180,16 @@ func pickBestResult(results []slskd.SearchResult, album *models.Album, tracks []
 	var best *scoredResult
 
 	for _, r := range results {
+		// Skip users with no free upload slots
+		if r.FreeUploadSlots == 0 {
+			continue
+		}
+
 		// Filter to only audio files
 		audioFiles := filterAudioFiles(r.Files)
 		if len(audioFiles) == 0 {
 			continue
 		}
-
-		log.Printf("[Karusu] Result from %s: %d audio files, %d free slots, speed=%d",
-			r.Username, len(audioFiles), r.FreeUploadSlots, r.UploadSpeed)
 
 		score := scoreResult(r, audioFiles, album, tracks)
 
@@ -193,11 +215,6 @@ func scoreResult(r slskd.SearchResult, files []slskd.FileResult, album *models.A
 
 	// Free slots bonus
 	score += r.FreeUploadSlots * 10
-
-	// Penalize users with no free slots but don't skip them entirely
-	if r.FreeUploadSlots == 0 {
-		score -= 20
-	}
 
 	// Check file formats — FLAC is king
 	hasFlac := false
