@@ -105,27 +105,43 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 
 	log.Printf("[Karasu] Found %d results, picking best...", len(results))
 
-	// Pick the best result
-	best := pickBestResult(results, album, tracks)
+	// Try up to 5 results in order of score
+	var best *scoredResult
+	tried := 0
+	for tried < 5 {
+		best = pickNthBestResult(results, album, tracks, tried)
+		if best == nil {
+			break
+		}
+
+		// Safety check — if too many files something went wrong with matching
+		if len(best.files) > MaxFilesPerDownload {
+			log.Printf("[Karasu] Too many files (%d), truncating to first %d", len(best.files), MaxFilesPerDownload)
+			best.files = best.files[:MaxFilesPerDownload]
+		}
+
+		log.Printf("[Karasu] Trying result %d: %s (%d files, score: %d)",
+			tried+1, best.result.Username, len(best.files), best.score)
+
+		failed := 0
+		for _, f := range best.files {
+			if err := d.slskd.EnqueueDownload(best.result.Username, f.Filename, f.Size); err != nil {
+				failed++
+			}
+		}
+
+		if failed < len(best.files) {
+			// At least some files enqueued — proceed with this result
+			break
+		}
+
+		log.Printf("[Karasu] All enqueues failed for %s, trying next result...", best.result.Username)
+		tried++
+	}
+
 	if best == nil {
 		d.db.UpdateAlbumStatus(albumID, models.AlbumStatusMissing)
 		return fmt.Errorf("no suitable result found for %s", query)
-	}
-
-	log.Printf("[Karasu] Best result from: %s (%d files, score: %d)",
-		best.result.Username, len(best.files), best.score)
-
-	// Safety check — if too many files something went wrong with matching
-	if len(best.files) > MaxFilesPerDownload {
-		log.Printf("[Karasu] Too many files (%d), truncating to first %d", len(best.files), MaxFilesPerDownload)
-		best.files = best.files[:MaxFilesPerDownload]
-	}
-
-	// Enqueue all files for download
-	for _, f := range best.files {
-		if err := d.slskd.EnqueueDownload(best.result.Username, f.Filename, f.Size); err != nil {
-			log.Printf("[Karasu] Warning: failed to enqueue %s: %v", f.Filename, err)
-		}
 	}
 
 	// Wait for all downloads to complete
@@ -179,33 +195,85 @@ type scoredResult struct {
 }
 
 // pickBestResult scores all results and returns the best one
+// It groups files by folder so we pick one clean album folder, not all versions
 func pickBestResult(results []slskd.SearchResult, album *models.Album, tracks []models.Track) *scoredResult {
 	var best *scoredResult
 
 	for _, r := range results {
-		// Skip users with no free upload slots
-		if r.FreeUploadSlots == 0 {
-			continue
-		}
-
 		// Filter to only audio files
 		audioFiles := filterAudioFiles(r.Files)
 		if len(audioFiles) == 0 {
 			continue
 		}
 
-		score := scoreResult(r, audioFiles, album, tracks)
+		// Group files by their parent folder
+		folders := groupByFolder(audioFiles)
 
-		if best == nil || score > best.score {
-			best = &scoredResult{
-				result: r,
-				files:  audioFiles,
-				score:  score,
+		// Score each folder separately and keep the best one from this user
+		for _, folderFiles := range folders {
+			score := scoreResult(r, folderFiles, album, tracks)
+
+			log.Printf("[Karasu] Result from %-20s | Files: %d | Slots: %d | Speed: %d",
+				r.Username, len(folderFiles), r.FreeUploadSlots, r.UploadSpeed)
+
+			if best == nil || score > best.score {
+				best = &scoredResult{
+					result: r,
+					files:  folderFiles,
+					score:  score,
+				}
 			}
 		}
 	}
 
 	return best
+}
+
+// pickNthBestResult returns the nth best scored result (0 = best, 1 = second best, etc.)
+// Used to fall through to the next candidate when enqueuing fails
+func pickNthBestResult(results []slskd.SearchResult, album *models.Album, tracks []models.Track, n int) *scoredResult {
+	var scored []*scoredResult
+
+	for _, r := range results {
+		audioFiles := filterAudioFiles(r.Files)
+		if len(audioFiles) == 0 {
+			continue
+		}
+		for _, folderFiles := range groupByFolder(audioFiles) {
+			score := scoreResult(r, folderFiles, album, tracks)
+			scored = append(scored, &scoredResult{result: r, files: folderFiles, score: score})
+		}
+	}
+
+	// Simple selection sort to find the nth best without importing sort
+	for i := 0; i <= n; i++ {
+		if i >= len(scored) {
+			return nil
+		}
+		for j := i + 1; j < len(scored); j++ {
+			if scored[j].score > scored[i].score {
+				scored[i], scored[j] = scored[j], scored[i]
+			}
+		}
+	}
+
+	if n >= len(scored) {
+		return nil
+	}
+	return scored[n]
+}
+
+// groupByFolder groups files by their parent directory path
+func groupByFolder(files []slskd.FileResult) map[string][]slskd.FileResult {
+	groups := make(map[string][]slskd.FileResult)
+	for _, f := range files {
+		dir := f.Filename
+		if idx := strings.LastIndexAny(f.Filename, "/\\"); idx >= 0 {
+			dir = f.Filename[:idx]
+		}
+		groups[dir] = append(groups[dir], f)
+	}
+	return groups
 }
 
 // scoreResult calculates a quality score for a search result
@@ -286,15 +354,17 @@ func filterAudioFiles(files []slskd.FileResult) []slskd.FileResult {
 // Download waiting
 // -----------------------------------------------------------------------------
 
-// waitForDownloads polls until all files from a user are done downloading
+// waitForDownloads polls until all files from a user are done downloading.
+// Returns an error if downloads time out or get stuck in remote queue with no progress.
 func (d *Downloader) waitForDownloads(username string, files []slskd.FileResult) error {
-	// Build a set of filenames we're waiting for
 	waiting := make(map[string]bool)
 	for _, f := range files {
 		waiting[f.Filename] = true
 	}
 
-	deadline := time.Now().Add(30 * time.Minute)
+	deadline := time.Now().Add(5 * time.Minute)
+	lastCompleted := 0
+	staleSince := time.Now()
 
 	for time.Now().Before(deadline) {
 		transfers, err := d.slskd.GetAllDownloads()
@@ -304,6 +374,7 @@ func (d *Downloader) waitForDownloads(username string, files []slskd.FileResult)
 
 		completed := 0
 		failed := 0
+		queued := 0
 
 		for _, t := range transfers {
 			if !waiting[t.Filename] {
@@ -315,13 +386,25 @@ func (d *Downloader) waitForDownloads(username string, files []slskd.FileResult)
 			case "Completed, Errored", "Completed, Cancelled":
 				failed++
 				log.Printf("[Karasu] Download failed: %s (%s)", t.Filename, t.State)
+			case "Queued, Remotely", "Queued":
+				queued++
 			}
 		}
 
-		log.Printf("[Karasu] Progress: %d/%d completed, %d failed",
-			completed, len(files), failed)
+		log.Printf("[Karasu] Progress: %d/%d completed, %d failed, %d queued",
+			completed, len(files), failed, queued)
 
-		// All done if completed + failed = total
+		// Reset stale timer whenever we make progress
+		if completed > lastCompleted {
+			lastCompleted = completed
+			staleSince = time.Now()
+		}
+
+		// If stuck in remote queue with no progress for 2 minutes, bail out
+		if queued > 0 && completed == 0 && time.Since(staleSince) > 2*time.Minute {
+			return fmt.Errorf("downloads stuck in remote queue, trying next user")
+		}
+
 		if completed+failed >= len(files) {
 			if failed > 0 {
 				log.Printf("[Karasu] Warning: %d files failed to download", failed)
@@ -332,7 +415,7 @@ func (d *Downloader) waitForDownloads(username string, files []slskd.FileResult)
 		time.Sleep(10 * time.Second)
 	}
 
-	return fmt.Errorf("downloads timed out after 30 minutes")
+	return fmt.Errorf("downloads timed out")
 }
 
 // -----------------------------------------------------------------------------
