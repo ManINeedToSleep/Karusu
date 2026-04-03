@@ -6,10 +6,16 @@ import (
 	"os"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	"karusu/internal/db"
 )
 
 func main() {
+	// Load .env file if it exists
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, using environment variables")
+	}
+
 	fmt.Println("Karusu starting...")
 
 	// Build the database connection string from environment variables
