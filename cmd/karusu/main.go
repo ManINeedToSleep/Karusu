@@ -9,7 +9,9 @@ import (
 	"github.com/joho/godotenv"
 	"karusu/internal/api"
 	"karusu/internal/db"
+	"karusu/internal/library"
 	"karusu/internal/metadata"
+	"karusu/internal/slskd"
 )
 
 func main() {
@@ -37,8 +39,16 @@ func main() {
 	}
 	defer database.Close()
 
+	slskdClient := slskd.NewClient(
+		getEnv("SLSKD_URL", "http://localhost:5030"),
+		getEnv("SLSKD_USERNAME", "neosgw"),
+		getEnv("SLSKD_PASSWORD", ""),
+	)
+	organizer := library.NewOrganizer(getEnv("MUSIC_DIR", "/mnt/music"))
+	downloader := library.NewDownloader(database, slskdClient, organizer)
+
 	mb := metadata.NewMusicBrainzClient()
-	h := api.NewHandler(database, mb)
+	h := api.NewHandler(database, mb, downloader)
 
 	// Set up the HTTP router
 	r := gin.Default()

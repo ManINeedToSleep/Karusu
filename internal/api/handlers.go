@@ -1,24 +1,27 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"karusu/internal/db"
+	"karusu/internal/library"
 	"karusu/internal/metadata"
 	"karusu/internal/models"
 )
 
 // Handler holds all dependencies needed by the API handlers
 type Handler struct {
-	db *db.DB
-	mb *metadata.MusicBrainzClient
+	db         *db.DB
+	mb         *metadata.MusicBrainzClient
+	downloader *library.Downloader
 }
 
 // NewHandler creates a new Handler
-func NewHandler(db *db.DB, mb *metadata.MusicBrainzClient) *Handler {
-	return &Handler{db: db, mb: mb}
+func NewHandler(db *db.DB, mb *metadata.MusicBrainzClient, downloader *library.Downloader) *Handler {
+	return &Handler{db: db, mb: mb, downloader: downloader}
 }
 
 // RegisterRoutes wires up all API routes to the gin router
@@ -254,8 +257,7 @@ func (h *Handler) downloadAlbum(c *gin.Context) {
 		return
 	}
 
-	album, err := h.db.GetAlbumByID(id)
-	if err != nil {
+	if _, err := h.db.GetAlbumByID(id); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "album not found"})
 		return
 	}
@@ -267,10 +269,10 @@ func (h *Handler) downloadAlbum(c *gin.Context) {
 	}
 
 	// Trigger the actual download in the background
-	// We'll implement the full download logic in a separate downloader service
 	go func() {
-		// TODO: implement full download pipeline in downloader.go
-		_ = album
+		if err := h.downloader.DownloadAlbum(id); err != nil {
+			log.Printf("[Karusu] Download failed for album %d: %v", id, err)
+		}
 	}()
 
 	c.JSON(http.StatusOK, gin.H{"message": "download started", "albumId": id})
