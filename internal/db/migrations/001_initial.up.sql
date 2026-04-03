@@ -1,4 +1,4 @@
--- Karusu initial database migration
+-- Karasu initial database migration
 -- Creates all core tables for artists, albums, tracks, and genres
 
 -- -----------------------------------------------------------------------------

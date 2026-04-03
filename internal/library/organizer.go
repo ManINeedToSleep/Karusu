@@ -10,7 +10,7 @@ import (
 
 	"github.com/bogem/id3v2/v2"
 	"github.com/dhowden/tag"
-	"karusu/internal/models"
+	"karasu/internal/models"
 )
 
 // Organizer moves and renames downloaded files into the music library

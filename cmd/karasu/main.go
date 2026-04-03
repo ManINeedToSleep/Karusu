@@ -8,11 +8,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
-	"karusu/internal/api"
-	"karusu/internal/db"
-	"karusu/internal/library"
-	"karusu/internal/metadata"
-	"karusu/internal/slskd"
+	"karasu/internal/api"
+	"karasu/internal/db"
+	"karasu/internal/library"
+	"karasu/internal/metadata"
+	"karasu/internal/slskd"
 )
 
 func main() {
@@ -21,7 +21,7 @@ func main() {
 		log.Println("No .env file found, using environment variables")
 	}
 
-	fmt.Println("Karusu starting...")
+	fmt.Println("Karasu starting...")
 
 	// Build the database connection string from environment variables
 	dsn := fmt.Sprintf(
@@ -30,7 +30,7 @@ func main() {
 		getEnv("DB_PORT", "5432"),
 		getEnv("DB_USER", "neosgw"),
 		getEnv("DB_PASSWORD", ""),
-		getEnv("DB_NAME", "karusu"),
+		getEnv("DB_NAME", "karasu"),
 	)
 
 	// Connect to PostgreSQL and run migrations
@@ -68,12 +68,12 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"status": "ok",
-			"app":    "karusu",
+			"app":    "karasu",
 		})
 	})
 
 	port := getEnv("PORT", "8080")
-	log.Printf("Karusu listening on :%s", port)
+	log.Printf("Karasu listening on :%s", port)
 	log.Fatal(r.Run(":" + port))
 }
 

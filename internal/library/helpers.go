@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"karusu/internal/models"
+	"karasu/internal/models"
 )
 
 // ParsePartialDate parses MusicBrainz dates which can be:

@@ -3,7 +3,7 @@ package models
 import "time"
 
 // DSN builds a PostgreSQL connection string from individual parts
-// e.g. DSN("localhost", "5432", "karusu", "neosgw", "password")
+// e.g. DSN("localhost", "5432", "karasu", "neosgw", "password")
 
 // -----------------------------------------------------------------------------
 // Enums

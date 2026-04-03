@@ -2,7 +2,7 @@ package db
 
 import (
 	"fmt"
-	"karusu/internal/models"
+	"karasu/internal/models"
 )
 
 // -----------------------------------------------------------------------------

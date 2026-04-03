@@ -1,4 +1,4 @@
-module karusu
+module karasu
 
 go 1.26.1
 

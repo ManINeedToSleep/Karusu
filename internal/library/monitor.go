@@ -4,9 +4,9 @@ import (
 	"log"
 	"time"
 
-	"karusu/internal/db"
-	"karusu/internal/metadata"
-	"karusu/internal/models"
+	"karasu/internal/db"
+	"karasu/internal/metadata"
+	"karasu/internal/models"
 )
 
 // Monitor checks for new releases from monitored artists and auto-downloads them

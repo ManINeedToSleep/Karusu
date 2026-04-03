@@ -7,10 +7,10 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
-	"karusu/internal/db"
-	"karusu/internal/library"
-	"karusu/internal/metadata"
-	"karusu/internal/models"
+	"karasu/internal/db"
+	"karasu/internal/library"
+	"karasu/internal/metadata"
+	"karasu/internal/models"
 )
 
 // Handler holds all dependencies needed by the API handlers
@@ -283,7 +283,7 @@ func (h *Handler) downloadAlbum(c *gin.Context) {
 	// Trigger the actual download in the background
 	go func() {
 		if err := h.downloader.DownloadAlbum(id); err != nil {
-			log.Printf("[Karusu] Download failed for album %d: %v", id, err)
+			log.Printf("[Karasu] Download failed for album %d: %v", id, err)
 		}
 	}()
 

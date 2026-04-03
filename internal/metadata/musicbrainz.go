@@ -11,7 +11,7 @@
 	const (
 		mbBaseURL   = "https://musicbrainz.org/ws/2"
 		// MusicBrainz requires a descriptive User-Agent or they'll block you
-		mbUserAgent = "Karusu/0.1 (https://github.com/ManINeedToSleep/karusu)"
+		mbUserAgent = "Karasu/0.1 (https://github.com/ManINeedToSleep/Karasu)"
 		// MusicBrainz rate limit — max 1 request per second
 		mbRateLimit = time.Second
 	)

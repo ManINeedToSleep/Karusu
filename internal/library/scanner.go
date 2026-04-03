@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"karusu/internal/db"
-	"karusu/internal/models"
+	"karasu/internal/db"
+	"karasu/internal/models"
 
 	"github.com/dhowden/tag"
 )

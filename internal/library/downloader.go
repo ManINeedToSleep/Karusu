@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"karusu/internal/db"
-	"karusu/internal/models"
-	"karusu/internal/slskd"
+	"karasu/internal/db"
+	"karasu/internal/models"
+	"karasu/internal/slskd"
 )
 
 const (
@@ -57,7 +57,7 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 		return fmt.Errorf("failed to get tracks: %w", err)
 	}
 
-	log.Printf("[Karusu] Starting download: %s - %s", artist.Name, album.Title)
+	log.Printf("[Karasu] Starting download: %s - %s", artist.Name, album.Title)
 
 	// Mark as downloading
 	if err := d.db.UpdateAlbumStatus(albumID, models.AlbumStatusDownloading); err != nil {
@@ -66,7 +66,7 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 
 	// Build search query
 	query := buildSearchQuery(artist.Name, album.Title)
-	log.Printf("[Karusu] Searching for: %s", query)
+	log.Printf("[Karasu] Searching for: %s", query)
 
 	// Search slskd
 	search, err := d.slskd.StartSearch(query)
@@ -89,7 +89,7 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 
 	if len(results) == 0 {
 		// Retry with wildcard — bypasses some Soulseek filters e.g. "*endrick Lamar"
-		log.Printf("[Karusu] No results, retrying with wildcard...")
+		log.Printf("[Karasu] No results, retrying with wildcard...")
 		wildcardQuery := "*" + buildSearchQuery(artist.Name[1:], album.Title)
 		search2, err2 := d.slskd.StartSearch(wildcardQuery)
 		if err2 == nil {
@@ -103,7 +103,7 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 		return fmt.Errorf("no results found for %s", query)
 	}
 
-	log.Printf("[Karusu] Found %d results, picking best...", len(results))
+	log.Printf("[Karasu] Found %d results, picking best...", len(results))
 
 	// Pick the best result
 	best := pickBestResult(results, album, tracks)
@@ -112,38 +112,38 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 		return fmt.Errorf("no suitable result found for %s", query)
 	}
 
-	log.Printf("[Karusu] Best result from: %s (%d files, score: %d)",
+	log.Printf("[Karasu] Best result from: %s (%d files, score: %d)",
 		best.result.Username, len(best.files), best.score)
 
 	// Safety check — if too many files something went wrong with matching
 	if len(best.files) > MaxFilesPerDownload {
-		log.Printf("[Karusu] Too many files (%d), truncating to first %d", len(best.files), MaxFilesPerDownload)
+		log.Printf("[Karasu] Too many files (%d), truncating to first %d", len(best.files), MaxFilesPerDownload)
 		best.files = best.files[:MaxFilesPerDownload]
 	}
 
 	// Enqueue all files for download
 	for _, f := range best.files {
 		if err := d.slskd.EnqueueDownload(best.result.Username, f.Filename, f.Size); err != nil {
-			log.Printf("[Karusu] Warning: failed to enqueue %s: %v", f.Filename, err)
+			log.Printf("[Karasu] Warning: failed to enqueue %s: %v", f.Filename, err)
 		}
 	}
 
 	// Wait for all downloads to complete
-	log.Printf("[Karusu] Waiting for %d files to download...", len(best.files))
+	log.Printf("[Karasu] Waiting for %d files to download...", len(best.files))
 	if err := d.waitForDownloads(best.result.Username, best.files); err != nil {
 		d.db.UpdateAlbumStatus(albumID, models.AlbumStatusMissing)
 		return fmt.Errorf("downloads failed: %w", err)
 	}
 
 	// Organize the downloaded files
-	log.Printf("[Karusu] Organizing files...")
+	log.Printf("[Karasu] Organizing files...")
 	if err := d.organizeDownloads(best.files, tracks, album, artist); err != nil {
-		log.Printf("[Karusu] Warning: organize failed: %v", err)
+		log.Printf("[Karasu] Warning: organize failed: %v", err)
 	}
 
 	// Mark album as downloaded
 	d.db.UpdateAlbumStatus(albumID, models.AlbumStatusDownloaded)
-	log.Printf("[Karusu] ✅ Done: %s - %s", artist.Name, album.Title)
+	log.Printf("[Karasu] ✅ Done: %s - %s", artist.Name, album.Title)
 
 	return nil
 }
@@ -152,15 +152,15 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 func (d *Downloader) DownloadWanted() {
 	albums, err := d.db.GetAlbumsByStatus(models.AlbumStatusWanted)
 	if err != nil {
-		log.Printf("[Karusu] Failed to get wanted albums: %v", err)
+		log.Printf("[Karasu] Failed to get wanted albums: %v", err)
 		return
 	}
 
-	log.Printf("[Karusu] Found %d wanted albums", len(albums))
+	log.Printf("[Karasu] Found %d wanted albums", len(albums))
 
 	for _, album := range albums {
 		if err := d.DownloadAlbum(album.ID); err != nil {
-			log.Printf("[Karusu] Failed to download album %d: %v", album.ID, err)
+			log.Printf("[Karasu] Failed to download album %d: %v", album.ID, err)
 		}
 		// Be nice to Soulseek — wait a bit between albums
 		time.Sleep(5 * time.Second)
@@ -314,17 +314,17 @@ func (d *Downloader) waitForDownloads(username string, files []slskd.FileResult)
 				completed++
 			case "Completed, Errored", "Completed, Cancelled":
 				failed++
-				log.Printf("[Karusu] Download failed: %s (%s)", t.Filename, t.State)
+				log.Printf("[Karasu] Download failed: %s (%s)", t.Filename, t.State)
 			}
 		}
 
-		log.Printf("[Karusu] Progress: %d/%d completed, %d failed",
+		log.Printf("[Karasu] Progress: %d/%d completed, %d failed",
 			completed, len(files), failed)
 
 		// All done if completed + failed = total
 		if completed+failed >= len(files) {
 			if failed > 0 {
-				log.Printf("[Karusu] Warning: %d files failed to download", failed)
+				log.Printf("[Karasu] Warning: %d files failed to download", failed)
 			}
 			return nil
 		}
@@ -356,21 +356,21 @@ func (d *Downloader) organizeDownloads(files []slskd.FileResult, tracks []models
 		trackNum := extractTrackNumber(f.Filename)
 		track, ok := trackMap[trackNum]
 		if !ok {
-			log.Printf("[Karusu] Warning: couldn't match file to track: %s", f.Filename)
+			log.Printf("[Karasu] Warning: couldn't match file to track: %s", f.Filename)
 			continue
 		}
 
 		// Move and rename the file
 		newPath, err := d.organizer.OrganizeTrack(downloadPath, track, album, artist)
 		if err != nil {
-			log.Printf("[Karusu] Warning: failed to organize %s: %v", f.Filename, err)
+			log.Printf("[Karasu] Warning: failed to organize %s: %v", f.Filename, err)
 			continue
 		}
 
 		// Update the track in the database
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(newPath)), ".")
 		if err := d.db.UpdateTrackFilePath(track.ID, newPath, ext, f.BitRate); err != nil {
-			log.Printf("[Karusu] Warning: failed to update track path: %v", err)
+			log.Printf("[Karasu] Warning: failed to update track path: %v", err)
 		}
 	}
 

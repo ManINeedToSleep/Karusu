@@ -11,7 +11,7 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o karusu ./cmd/karusu
+RUN CGO_ENABLED=0 GOOS=linux go build -o karasu ./cmd/karasu
 
 # Run stage — minimal image with just the binary
 FROM alpine:latest
@@ -22,11 +22,11 @@ WORKDIR /app
 RUN apk --no-cache add ca-certificates tzdata
 
 # Copy the binary from the builder
-COPY --from=builder /app/karusu .
+COPY --from=builder /app/karasu .
 
 # Copy migrations so they're available at runtime
 COPY --from=builder /app/internal/db/migrations ./internal/db/migrations
 
 EXPOSE 8080
 
-CMD ["./karusu"]
+CMD ["./karasu"]
