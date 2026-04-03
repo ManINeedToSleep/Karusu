@@ -1,0 +1,14 @@
+# Environment variables — never commit these
+.env
+
+# Go build output
+/karusu
+*.exe
+
+# IDE stuff
+.vscode/
+.idea/
+
+# OS stuff
+.DS_Store
+Thumbs.db
