@@ -1,6 +1,7 @@
 package library
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -31,13 +32,27 @@ type ScanResult struct {
 	Errors       []string
 }
 
-// Scan walks the music directory and updates the database
+// ProgressFunc is called periodically during a scan.
+// found = cumulative files matched so far, msg = human-readable status line.
+type ProgressFunc func(found int, msg string)
+
+// Scan walks the music directory and updates the database.
+// Kept for backwards compatibility — delegates to ScanWithProgress with no callback.
 func (s *Scanner) Scan() (*ScanResult, error) {
+	return s.ScanWithProgress(nil)
+}
+
+// ScanWithProgress is like Scan but calls progressFn after each file is processed.
+// progressFn may be nil — if so, it behaves identically to Scan().
+func (s *Scanner) ScanWithProgress(progressFn ProgressFunc) (*ScanResult, error) {
 	result := &ScanResult{}
 
 	log.Printf("[Scanner] Starting scan of %s", s.root)
 
-	// Walk every audio file in the music directory
+	if progressFn != nil {
+		progressFn(0, "Walking music directory…")
+	}
+
 	err := filepath.Walk(s.root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // skip errors, keep walking
@@ -54,7 +69,6 @@ func (s *Scanner) Scan() (*ScanResult, error) {
 
 		result.FilesFound++
 
-		// Try to match this file to a track in the database
 		linked, err := s.matchFile(path)
 		if err != nil {
 			result.Errors = append(result.Errors, err.Error())
@@ -64,6 +78,11 @@ func (s *Scanner) Scan() (*ScanResult, error) {
 			result.TracksLinked++
 		}
 
+		// Report progress after each file
+		if progressFn != nil {
+			progressFn(result.TracksLinked, fmt.Sprintf("Matched %d / %d files…", result.TracksLinked, result.FilesFound))
+		}
+
 		return nil
 	})
 
@@ -71,7 +90,10 @@ func (s *Scanner) Scan() (*ScanResult, error) {
 		return result, err
 	}
 
-	// After linking tracks, update album statuses
+	if progressFn != nil {
+		progressFn(result.TracksLinked, "Updating album statuses…")
+	}
+
 	marked, err := s.updateAlbumStatuses()
 	if err != nil {
 		log.Printf("[Scanner] Failed to update album statuses: %v", err)
@@ -85,18 +107,13 @@ func (s *Scanner) Scan() (*ScanResult, error) {
 }
 
 // matchFile tries to match an audio file to a track in the database
-// It tries two strategies: reading ID3 tags, then falling back to filename parsing
 func (s *Scanner) matchFile(path string) (bool, error) {
-	// Strategy 1: read tags from the file
 	if track := s.matchByTags(path); track != nil {
 		return s.linkTrack(track, path)
 	}
-
-	// Strategy 2: parse the filename
 	if track := s.matchByFilename(path); track != nil {
 		return s.linkTrack(track, path)
 	}
-
 	return false, nil
 }
 
@@ -121,41 +138,33 @@ func (s *Scanner) matchByTags(path string) *models.Track {
 		return nil
 	}
 
-	// Find the track in the database by title + album + artist
 	track, err := s.db.FindTrackByTags(title, album, artist)
 	if err != nil {
 		return nil
 	}
-
 	return track
 }
 
 // matchByFilename tries to parse track info from the file path
-// e.g. /mnt/music/Ado/狂言 (2022)/01 - レディメイド.flac
 func (s *Scanner) matchByFilename(path string) *models.Track {
-	// Get relative path from music root
 	rel, err := filepath.Rel(s.root, path)
 	if err != nil {
 		return nil
 	}
 
-	// Split into parts: Artist / Album / Filename
 	parts := strings.Split(rel, string(filepath.Separator))
 	if len(parts) < 3 {
 		return nil
 	}
 
 	artistName := parts[0]
-	// albumName := parts[1] // available if needed
 	filename := strings.TrimSuffix(parts[len(parts)-1], filepath.Ext(parts[len(parts)-1]))
 
-	// Extract track number from filename e.g. "01 - レディメイド" → 1
 	trackNum := extractTrackNumber(filename)
 	if trackNum == 0 {
 		return nil
 	}
 
-	// Find artist in database
 	artists, err := s.db.GetAllArtists()
 	if err != nil {
 		return nil
@@ -168,36 +177,30 @@ func (s *Scanner) matchByFilename(path string) *models.Track {
 			break
 		}
 	}
-
 	if artistID == 0 {
 		return nil
 	}
 
-	// Find track by artist + track number
 	track, err := s.db.FindTrackByNumber(artistID, trackNum)
 	if err != nil {
 		return nil
 	}
-
 	return track
 }
 
 // linkTrack updates a track's file path and status in the database
 func (s *Scanner) linkTrack(track *models.Track, path string) (bool, error) {
-	// Already linked to this path
 	if track.FilePath == path {
 		return false, nil
 	}
-
 	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 	if err := s.db.UpdateTrackFilePath(track.ID, path, ext, 0); err != nil {
 		return false, err
 	}
-
 	return true, nil
 }
 
-// updateAlbumStatuses checks each album and marks it downloaded if all tracks are present
+// updateAlbumStatuses marks albums as downloaded when enough tracks are present
 func (s *Scanner) updateAlbumStatuses() (int, error) {
 	artists, err := s.db.GetAllArtists()
 	if err != nil {
@@ -210,32 +213,25 @@ func (s *Scanner) updateAlbumStatuses() (int, error) {
 		if err != nil {
 			continue
 		}
-
 		for _, album := range albums {
 			if album.Status == models.AlbumStatusDownloaded {
 				continue
 			}
-
 			tracks, err := s.db.GetTracksByAlbum(album.ID)
 			if err != nil || len(tracks) == 0 {
 				continue
 			}
-
-			// Count how many tracks have file paths
 			downloaded := 0
 			for _, t := range tracks {
 				if t.FilePath != "" && t.Status == models.TrackStatusDownloaded {
 					downloaded++
 				}
 			}
-
-			// If more than half the tracks are downloaded, mark album as downloaded
 			if downloaded > 0 && downloaded >= len(tracks)/2 {
 				s.db.UpdateAlbumStatus(album.ID, models.AlbumStatusDownloaded)
 				marked++
 			}
 		}
 	}
-
 	return marked, nil
 }

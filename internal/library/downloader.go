@@ -7,14 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"karasu/internal/api"
 	"karasu/internal/db"
 	"karasu/internal/models"
 	"karasu/internal/slskd"
 )
 
 const (
-	// MaxFilesPerDownload prevents accidentally downloading entire libraries
-	// when a wildcard search matches too broadly
 	MaxFilesPerDownload = 50
 )
 
@@ -38,10 +37,7 @@ func NewDownloader(db *db.DB, slskd *slskd.Client, organizer *Organizer) *Downlo
 // Main pipeline
 // -----------------------------------------------------------------------------
 
-// DownloadAlbum runs the full pipeline for a single album:
-// search → pick best result → download → organize → update database
 func (d *Downloader) DownloadAlbum(albumID int) error {
-	// Load album and artist from database
 	album, err := d.db.GetAlbumByID(albumID)
 	if err != nil {
 		return fmt.Errorf("album not found: %w", err)
@@ -59,36 +55,37 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 
 	log.Printf("[Karasu] Starting download: %s - %s", artist.Name, album.Title)
 
-	// Mark as downloading
 	if err := d.db.UpdateAlbumStatus(albumID, models.AlbumStatusDownloading); err != nil {
 		return fmt.Errorf("failed to update status: %w", err)
 	}
 
-	// Build search query
+	// Seed progress at 0% so the UI shows something immediately
+	api.SetAlbumProgress(albumID, 0, "", "")
+
 	query := buildSearchQuery(artist.Name, album.Title)
 	log.Printf("[Karasu] Searching for: %s", query)
 
-	// Search slskd
 	search, err := d.slskd.StartSearch(query)
 	if err != nil {
 		d.db.UpdateAlbumStatus(albumID, models.AlbumStatusMissing)
+		api.ClearAlbumProgress(albumID)
 		return fmt.Errorf("search failed: %w", err)
 	}
 
-	// Wait for results
 	if err := d.slskd.WaitForSearch(search.ID, 45*time.Second); err != nil {
 		d.db.UpdateAlbumStatus(albumID, models.AlbumStatusMissing)
+		api.ClearAlbumProgress(albumID)
 		return fmt.Errorf("search timed out: %w", err)
 	}
 
 	results, err := d.slskd.GetSearchResults(search.ID)
 	if err != nil {
 		d.db.UpdateAlbumStatus(albumID, models.AlbumStatusMissing)
+		api.ClearAlbumProgress(albumID)
 		return fmt.Errorf("failed to get results: %w", err)
 	}
 
 	if len(results) == 0 {
-		// Retry with wildcard — bypasses some Soulseek filters e.g. "*endrick Lamar"
 		log.Printf("[Karasu] No results, retrying with wildcard...")
 		wildcardQuery := "*" + buildSearchQuery(artist.Name[1:], album.Title)
 		search2, err2 := d.slskd.StartSearch(wildcardQuery)
@@ -100,12 +97,12 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 
 	if len(results) == 0 {
 		d.db.UpdateAlbumStatus(albumID, models.AlbumStatusMissing)
+		api.ClearAlbumProgress(albumID)
 		return fmt.Errorf("no results found for %s", query)
 	}
 
 	log.Printf("[Karasu] Found %d results, picking best...", len(results))
 
-	// Try up to 5 results in order of score
 	var best *scoredResult
 	tried := 0
 	for tried < 5 {
@@ -114,7 +111,6 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 			break
 		}
 
-		// Safety check — if too many files something went wrong with matching
 		if len(best.files) > MaxFilesPerDownload {
 			log.Printf("[Karasu] Too many files (%d), truncating to first %d", len(best.files), MaxFilesPerDownload)
 			best.files = best.files[:MaxFilesPerDownload]
@@ -131,7 +127,6 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 		}
 
 		if failed < len(best.files) {
-			// At least some files enqueued — proceed with this result
 			break
 		}
 
@@ -141,30 +136,29 @@ func (d *Downloader) DownloadAlbum(albumID int) error {
 
 	if best == nil {
 		d.db.UpdateAlbumStatus(albumID, models.AlbumStatusMissing)
+		api.ClearAlbumProgress(albumID)
 		return fmt.Errorf("no suitable result found for %s", query)
 	}
 
-	// Wait for all downloads to complete
 	log.Printf("[Karasu] Waiting for %d files to download...", len(best.files))
-	if err := d.waitForDownloads(best.result.Username, best.files); err != nil {
+	if err := d.waitForDownloads(albumID, best.result.Username, best.files); err != nil {
 		d.db.UpdateAlbumStatus(albumID, models.AlbumStatusMissing)
+		api.ClearAlbumProgress(albumID)
 		return fmt.Errorf("downloads failed: %w", err)
 	}
 
-	// Organize the downloaded files
 	log.Printf("[Karasu] Organizing files...")
 	if err := d.organizeDownloads(best.files, tracks, album, artist); err != nil {
 		log.Printf("[Karasu] Warning: organize failed: %v", err)
 	}
 
-	// Mark album as downloaded
 	d.db.UpdateAlbumStatus(albumID, models.AlbumStatusDownloaded)
+	api.ClearAlbumProgress(albumID) // clean up — album is done
 	log.Printf("[Karasu] ✅ Done: %s - %s", artist.Name, album.Title)
 
 	return nil
 }
 
-// DownloadWanted finds all wanted albums and downloads them one by one
 func (d *Downloader) DownloadWanted() {
 	albums, err := d.db.GetAlbumsByStatus(models.AlbumStatusWanted)
 	if err != nil {
@@ -178,7 +172,6 @@ func (d *Downloader) DownloadWanted() {
 		if err := d.DownloadAlbum(album.ID); err != nil {
 			log.Printf("[Karasu] Failed to download album %d: %v", album.ID, err)
 		}
-		// Be nice to Soulseek — wait a bit between albums
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -187,41 +180,27 @@ func (d *Downloader) DownloadWanted() {
 // Result scoring
 // -----------------------------------------------------------------------------
 
-// scoredResult pairs a search result with its score and matched files
 type scoredResult struct {
 	result slskd.SearchResult
 	files  []slskd.FileResult
 	score  int
 }
 
-// pickBestResult scores all results and returns the best one
-// It groups files by folder so we pick one clean album folder, not all versions
 func pickBestResult(results []slskd.SearchResult, album *models.Album, tracks []models.Track) *scoredResult {
 	var best *scoredResult
 
 	for _, r := range results {
-		// Filter to only audio files
 		audioFiles := filterAudioFiles(r.Files)
 		if len(audioFiles) == 0 {
 			continue
 		}
-
-		// Group files by their parent folder
 		folders := groupByFolder(audioFiles)
-
-		// Score each folder separately and keep the best one from this user
 		for _, folderFiles := range folders {
 			score := scoreResult(r, folderFiles, album, tracks)
-
 			log.Printf("[Karasu] Result from %-20s | Files: %d | Slots: %d | Speed: %d",
 				r.Username, len(folderFiles), r.FreeUploadSlots, r.UploadSpeed)
-
 			if best == nil || score > best.score {
-				best = &scoredResult{
-					result: r,
-					files:  folderFiles,
-					score:  score,
-				}
+				best = &scoredResult{result: r, files: folderFiles, score: score}
 			}
 		}
 	}
@@ -229,8 +208,6 @@ func pickBestResult(results []slskd.SearchResult, album *models.Album, tracks []
 	return best
 }
 
-// pickNthBestResult returns the nth best scored result (0 = best, 1 = second best, etc.)
-// Used to fall through to the next candidate when enqueuing fails
 func pickNthBestResult(results []slskd.SearchResult, album *models.Album, tracks []models.Track, n int) *scoredResult {
 	var scored []*scoredResult
 
@@ -245,7 +222,6 @@ func pickNthBestResult(results []slskd.SearchResult, album *models.Album, tracks
 		}
 	}
 
-	// Simple selection sort to find the nth best without importing sort
 	for i := 0; i <= n; i++ {
 		if i >= len(scored) {
 			return nil
@@ -263,7 +239,6 @@ func pickNthBestResult(results []slskd.SearchResult, album *models.Album, tracks
 	return scored[n]
 }
 
-// groupByFolder groups files by their parent directory path
 func groupByFolder(files []slskd.FileResult) map[string][]slskd.FileResult {
 	groups := make(map[string][]slskd.FileResult)
 	for _, f := range files {
@@ -276,18 +251,11 @@ func groupByFolder(files []slskd.FileResult) map[string][]slskd.FileResult {
 	return groups
 }
 
-// scoreResult calculates a quality score for a search result
-// Higher is better
 func scoreResult(r slskd.SearchResult, files []slskd.FileResult, album *models.Album, tracks []models.Track) int {
 	score := 0
-
-	// Upload speed bonus (faster = better)
-	score += r.UploadSpeed / 100000 // normalize to reasonable range
-
-	// Free slots bonus
+	score += r.UploadSpeed / 100000
 	score += r.FreeUploadSlots * 10
 
-	// Check file formats — FLAC is king
 	hasFlac := false
 	hasMp3 := false
 	totalBitrate := 0
@@ -297,12 +265,10 @@ func scoreResult(r slskd.SearchResult, files []slskd.FileResult, album *models.A
 		switch ext {
 		case ".flac":
 			hasFlac = true
-			score += 50 // big bonus for FLAC
+			score += 50
 		case ".mp3":
 			hasMp3 = true
 		}
-
-		// Bitrate bonus
 		if f.BitRate >= 320 {
 			score += 20
 		} else if f.BitRate >= 256 {
@@ -311,8 +277,6 @@ func scoreResult(r slskd.SearchResult, files []slskd.FileResult, album *models.A
 			score += 5
 		}
 		totalBitrate += f.BitRate
-
-		// Bit depth bonus (for FLAC — 24bit > 16bit)
 		if f.BitDepth >= 24 {
 			score += 15
 		}
@@ -322,15 +286,13 @@ func scoreResult(r slskd.SearchResult, files []slskd.FileResult, album *models.A
 	_ = hasFlac
 	_ = totalBitrate
 
-	// Completeness bonus — does the number of files match the expected track count?
 	if album.TotalTracks > 0 {
 		if len(files) == album.TotalTracks {
-			score += 100 // perfect match
+			score += 100
 		} else if len(files) >= album.TotalTracks-1 {
-			score += 50 // close enough
+			score += 50
 		}
 	} else if len(tracks) > 0 {
-		// Fall back to our db track count
 		if len(files) == len(tracks) {
 			score += 100
 		}
@@ -339,7 +301,6 @@ func scoreResult(r slskd.SearchResult, files []slskd.FileResult, album *models.A
 	return score
 }
 
-// filterAudioFiles returns only audio files from a list of files
 func filterAudioFiles(files []slskd.FileResult) []slskd.FileResult {
 	var audio []slskd.FileResult
 	for _, f := range files {
@@ -351,17 +312,18 @@ func filterAudioFiles(files []slskd.FileResult) []slskd.FileResult {
 }
 
 // -----------------------------------------------------------------------------
-// Download waiting
+// Download waiting — with live progress reporting
 // -----------------------------------------------------------------------------
 
-// waitForDownloads polls until all files from a user are done downloading.
-// Returns an error if downloads time out or get stuck in remote queue with no progress.
-func (d *Downloader) waitForDownloads(username string, files []slskd.FileResult) error {
+// waitForDownloads polls until all files are done and reports progress
+// to the API layer via api.SetAlbumProgress so the UI can display it.
+func (d *Downloader) waitForDownloads(albumID int, username string, files []slskd.FileResult) error {
 	waiting := make(map[string]bool)
 	for _, f := range files {
 		waiting[f.Filename] = true
 	}
 
+	total := len(files)
 	deadline := time.Now().Add(5 * time.Minute)
 	lastCompleted := 0
 	staleSince := time.Now()
@@ -375,6 +337,8 @@ func (d *Downloader) waitForDownloads(username string, files []slskd.FileResult)
 		completed := 0
 		failed := 0
 		queued := 0
+		var totalSpeed int64  // bytes/sec across active transfers
+		activeCount := 0
 
 		for _, t := range transfers {
 			if !waiting[t.Filename] {
@@ -388,24 +352,43 @@ func (d *Downloader) waitForDownloads(username string, files []slskd.FileResult)
 				log.Printf("[Karasu] Download failed: %s (%s)", t.Filename, t.State)
 			case "Queued, Remotely", "Queued":
 				queued++
+			default:
+				// Actively transferring — accumulate bytes transferred
+				if t.BytesTransferred > 0 {
+					totalSpeed += t.BytesTransferred
+					activeCount++
+				}
 			}
 		}
 
-		log.Printf("[Karasu] Progress: %d/%d completed, %d failed, %d queued",
-			completed, len(files), failed, queued)
+		// Calculate percent and format speed string
+		percent := 0.0
+		if total > 0 {
+			percent = float64(completed) / float64(total) * 100
+		}
 
-		// Reset stale timer whenever we make progress
+		speedStr := ""
+		if totalSpeed > 0 {
+			mbps := float64(totalSpeed) / 1_000_000
+			speedStr = fmt.Sprintf("%.1f MB/s", mbps)
+		}
+
+		// Push live progress to the API layer
+		api.SetAlbumProgress(albumID, percent, speedStr, "")
+
+		log.Printf("[Karasu] Progress: %d/%d completed, %d failed, %d queued — %.0f%%",
+			completed, total, failed, queued, percent)
+
 		if completed > lastCompleted {
 			lastCompleted = completed
 			staleSince = time.Now()
 		}
 
-		// If stuck in remote queue with no progress for 2 minutes, bail out
 		if queued > 0 && completed == 0 && time.Since(staleSince) > 2*time.Minute {
 			return fmt.Errorf("downloads stuck in remote queue, trying next user")
 		}
 
-		if completed+failed >= len(files) {
+		if completed+failed >= total {
 			if failed > 0 {
 				log.Printf("[Karasu] Warning: %d files failed to download", failed)
 			}
@@ -422,35 +405,25 @@ func (d *Downloader) waitForDownloads(username string, files []slskd.FileResult)
 // File organization
 // -----------------------------------------------------------------------------
 
-// organizeDownloads moves downloaded files into the music library
 func (d *Downloader) organizeDownloads(files []slskd.FileResult, tracks []models.Track, album *models.Album, artist *models.Artist) error {
-	// Build a map of track number → track for matching
 	trackMap := make(map[int]*models.Track)
 	for i := range tracks {
 		trackMap[tracks[i].TrackNumber] = &tracks[i]
 	}
 
 	for _, f := range files {
-		// The downloaded file lives in the slskd downloads folder
-		// slskd saves files as: /app/downloads/{username}/{filename}
 		downloadPath := filepath.Join("/mnt/music/downloads", filepath.Base(f.Filename))
-
-		// Try to match this file to a track by track number
 		trackNum := extractTrackNumber(f.Filename)
 		track, ok := trackMap[trackNum]
 		if !ok {
 			log.Printf("[Karasu] Warning: couldn't match file to track: %s", f.Filename)
 			continue
 		}
-
-		// Move and rename the file
 		newPath, err := d.organizer.OrganizeTrack(downloadPath, track, album, artist)
 		if err != nil {
 			log.Printf("[Karasu] Warning: failed to organize %s: %v", f.Filename, err)
 			continue
 		}
-
-		// Update the track in the database
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(newPath)), ".")
 		if err := d.db.UpdateTrackFilePath(track.ID, newPath, ext, f.BitRate); err != nil {
 			log.Printf("[Karasu] Warning: failed to update track path: %v", err)
@@ -464,18 +437,13 @@ func (d *Downloader) organizeDownloads(files []slskd.FileResult, tracks []models
 // Helpers
 // -----------------------------------------------------------------------------
 
-// buildSearchQuery creates a Soulseek search string for an album
 func buildSearchQuery(artistName, albumTitle string) string {
 	return fmt.Sprintf("%s %s", artistName, albumTitle)
 }
 
-// extractTrackNumber tries to pull a track number from a filename
-// e.g. "01 - Alright.flac" → 1
-//      "03. DNA.mp3" → 3
 func extractTrackNumber(filename string) int {
 	base := filepath.Base(filename)
 	var num int
-	// Try common patterns: "01 -", "01.", "01 "
 	fmt.Sscanf(base, "%d", &num)
 	return num
 }
